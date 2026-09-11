@@ -6,7 +6,7 @@ show any enterprise customer something in their language, with their systems,
 in their workflow.
 
 For *how* to build a persona to the bar (the seller test), see
-`~/.copilot/skills/kratos-persona-builder/SKILL.md`. This doc is only about
+`.copilot/skills/kratos-persona-builder/SKILL.md`. This doc is only about
 *what to build next, in what order*.
 
 ## Shipped (9)

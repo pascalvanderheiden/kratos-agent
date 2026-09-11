@@ -44,7 +44,7 @@ repo are disruptive and the data is already exposed.
 | `src/obo-mcp-server` | On-behalf-of MCP server (optional, `DEPLOY_OBO` flag) |
 | `use-cases/` | Persona definitions, skills and synthetic assets |
 | `infra/` | Bicep templates |
-| `.copilot/skills/` | Repo-local agent skills, incl. `e2e-smoke` |
+| `.copilot/skills/` | Repo-local agent skills, incl. `e2e-smoke` and `kratos-persona-builder` |
 
 ## Personas: curated vs. non-curated
 
@@ -55,6 +55,10 @@ deliberately hidden in the UI, and may have no eval scenarios generated.
 Don't hardcode persona lists in tests or tooling — discover them from
 `/api/use-cases` and filter on `curated`. A test demanding a non-curated
 persona in the UI is a broken test, not a broken app.
+
+Building a new persona is a documented workflow, not freehand: what to build
+next lives in `use-cases/ROADMAP.md`, and how to build it to the seller-test bar
+lives in `.copilot/skills/kratos-persona-builder/SKILL.md`.
 
 ## Validation
 
