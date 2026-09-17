@@ -8,6 +8,7 @@ Uses DefaultAzureCredential for keyless auth to Microsoft Foundry.
 import asyncio
 import copy
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -466,12 +467,13 @@ class CopilotAgent:
                 )
 
             # Cloud, or local opted-in to the APIM gateway: authenticate to the
-            # Azure endpoint. NOTE: the Copilot SDK's backing engine authenticates
-            # to the provider with its OWN ambient Azure credentials
-            # (DefaultAzureCredential): Managed Identity in the Foundry sandbox /
-            # Container App, an EnvironmentCredential service principal, or the az
-            # CLI locally. The token_provider we set here is best-effort and may be
-            # ignored by the engine — so a failure to pre-warm it is NOT fatal.
+            # Azure endpoint. The token is handed to the SDK runtime through the
+            # provider's ``bearer_token_provider`` callback (see
+            # ``_build_provider_config``), which the runtime invokes before every
+            # outbound provider request and applies as the Authorization header.
+            # The engine does NOT fall back to ambient Azure credentials — without
+            # that callback it looks for COPILOT_PROVIDER_API_KEY /
+            # COPILOT_PROVIDER_BEARER_TOKEN and fails with HTTP 401.
             #   * Cloud sandbox   → Managed Identity (with az-CLI fallback for dev).
             #   * Local + gateway → az CLI credential (operator is `az login`-ed),
             #     so LLM calls flow through the APIM gateway and are captured in
@@ -490,18 +492,17 @@ class CopilotAgent:
             scope = "https://cognitiveservices.azure.com/.default"
             self._token_provider = get_bearer_token_provider(self._credential, scope)
 
-            # Pre-warm the token so a request doesn't pay first-token latency. This
-            # is best-effort: the engine has its own ambient credential, so a
-            # failure here is only a warning (e.g. local container without az CLI —
-            # the engine still authenticates via its ambient managed identity / SP).
+            # Pre-warm the token so a request doesn't pay first-token latency. A
+            # failure here is not fatal at startup, but it does predict failing LLM
+            # calls: the runtime has no other credential to fall back on.
             try:
                 t0 = time.monotonic()
                 await self._credential.get_token(scope)
                 logger.info("Token pre-warmed successfully in %.1fms", (time.monotonic() - t0) * 1000)
             except Exception:
                 logger.warning(
-                    "Token pre-warm failed (non-fatal — engine uses its own ambient credential). "
-                    "If LLM calls fail, ensure ambient Azure creds are available (Managed Identity, "
+                    "Token pre-warm failed — LLM calls will 401 until Azure credentials resolve. "
+                    "Ensure credentials are available (Managed Identity, "
                     "AZURE_CLIENT_ID/SECRET/TENANT_ID, or `az login`).",
                     exc_info=True,
                 )
@@ -633,6 +634,32 @@ class CopilotAgent:
             return True
         return bool(self.settings.llm_gateway_base_url)
 
+    async def _provider_bearer_token(self, _args: object = None) -> str:
+        """Resolve an Entra bearer token for the SDK runtime's provider requests.
+
+        The Copilot SDK invokes this before each outbound provider call (it is
+        never serialized — the SDK only signals ``hasBearerTokenProvider`` on the
+        wire) and applies the result as the ``Authorization`` header. Token
+        caching and refresh are handled by azure-identity behind
+        ``get_bearer_token_provider``.
+
+        Args:
+            _args: Per-request metadata supplied by the runtime; unused.
+
+        Returns:
+            A bearer token for the Cognitive Services data plane.
+
+        Raises:
+            RuntimeError: If called before ``start()`` configured a credential.
+        """
+        provider = self._token_provider
+        if provider is None:
+            raise RuntimeError("Bearer token provider requested before the Azure credential was initialized")
+        token = provider()
+        if inspect.isawaitable(token):
+            token = await token
+        return token
+
     def _build_provider_config(self) -> dict | None:
         """Return the Azure provider dict, or ``None`` for the GitHub-hosted model.
 
@@ -644,6 +671,13 @@ class CopilotAgent:
         AI Services account directly. Both expose the same
         ``/openai/deployments/<model>/chat/completions`` shape.
 
+        Auth goes through ``bearer_token_provider``: the AI Services account sets
+        ``disableLocalAuth``, so API keys are rejected, and the runtime has no
+        ambient Azure credential of its own. The key must be spelled exactly
+        ``bearer_token_provider`` — the SDK ignores unknown provider fields, which
+        leaves the runtime falling back to ``COPILOT_PROVIDER_API_KEY`` /
+        ``COPILOT_PROVIDER_BEARER_TOKEN`` and failing with HTTP 401.
+
         Returns:
             A provider configuration dict for ``CopilotClient`` sessions when
             running against Azure OpenAI, or ``None`` for local GitHub-hosted mode.
@@ -654,7 +688,7 @@ class CopilotAgent:
         return {
             "type": "azure",
             "base_url": f"{llm_base}/openai/deployments/{self.settings.foundry_model_deployment}",
-            "token_provider": self._token_provider,
+            "bearer_token_provider": self._provider_bearer_token,
             "wire_api": "completions",
             "azure": {
                 "api_version": "2024-10-21",
