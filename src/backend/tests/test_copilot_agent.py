@@ -54,6 +54,55 @@ async def test_copilot_agent_start_stop(settings):
 
 
 @pytest.mark.asyncio
+async def test_provider_config_uses_bearer_token_provider(settings):
+    """Provider auth must ride on the SDK's ``bearer_token_provider`` callback.
+
+    The SDK silently drops unknown provider fields, so a misspelled key leaves the
+    runtime with no credential; it then falls back to COPILOT_PROVIDER_API_KEY /
+    COPILOT_PROVIDER_BEARER_TOKEN and every LLM call fails with HTTP 401.
+    """
+    cloud_agent = CopilotAgent(settings.model_copy(update={"local_mode": False}))
+    mock_client = AsyncMock()
+    mock_credential = AsyncMock()
+    with (
+        patch("app.services.copilot_agent.CopilotClient", return_value=mock_client),
+        patch("app.services.copilot_agent.ManagedIdentityCredential", return_value=mock_credential),
+        patch("app.services.copilot_agent._HAS_CLI_CREDENTIAL", False),
+        patch("app.services.copilot_agent.get_bearer_token_provider", return_value=lambda: "token"),
+    ):
+        await cloud_agent.start()
+
+        provider = cloud_agent._build_provider_config()
+        assert provider is not None
+        assert "token_provider" not in provider
+        assert provider["bearer_token_provider"] is cloud_agent._provider_bearer_token
+        assert provider["base_url"] == "https://test.services.ai.azure.com/openai/deployments/gpt-52"
+        assert await provider["bearer_token_provider"](None) == "token"
+
+        await cloud_agent.stop()
+
+
+@pytest.mark.asyncio
+async def test_provider_bearer_token_awaits_async_provider(settings):
+    """azure-identity's aio helper returns an awaitable — resolve it, don't return it."""
+    cloud_agent = CopilotAgent(settings.model_copy(update={"local_mode": False}))
+
+    async def async_provider():
+        return "async-token"
+
+    cloud_agent._token_provider = async_provider
+    assert await cloud_agent._provider_bearer_token(None) == "async-token"
+
+
+@pytest.mark.asyncio
+async def test_provider_bearer_token_without_credential(settings):
+    """Calling before start() must fail loudly rather than yield an empty header."""
+    cloud_agent = CopilotAgent(settings.model_copy(update={"local_mode": False}))
+    with pytest.raises(RuntimeError, match="before the Azure credential"):
+        await cloud_agent._provider_bearer_token(None)
+
+
+@pytest.mark.asyncio
 async def test_copilot_agent_run_streams_content(copilot_agent):
     """Test that run() yields ContentEvent from SDK assistant.message.delta events."""
     mock_session = AsyncMock()
